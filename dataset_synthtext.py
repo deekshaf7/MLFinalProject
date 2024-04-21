@@ -20,6 +20,9 @@ import numpy as np
 import scipy.io as sio
 import torch
 from transformers import CanineTokenizer, CanineModel
+import cv2
+import clip
+
 
 def extract_image_file_paths(mat_contents, image_rootdir):
     image_files = []
@@ -61,6 +64,58 @@ def get_embeddings(words):
         final_embeddings[i] = average_embedding
     return final_embeddings
 
+
+def mask_image_outside_bbox(image, bbox):
+    """
+    Mask the image outside the bounding box and make the inside white.
+ 
+    Parameters:
+    - image_path: str, path to the image file.
+    - bbox: tuple of (x, y, width, height), the bounding box inside which the image will be white.
+ 
+    Returns:
+    - masked_image: the image with masking applied.
+    """
+
+ 
+    # Create a mask where the area inside the bbox is white
+    mask = np.zeros_like(image)
+    x, y, width, height = bbox
+    mask[y:y+height, x:x+width] = 255
+ 
+    # Apply the mask to the image
+    masked_image = cv2.bitwise_and(image, mask)
+ 
+    # Make the inside of the bbox white
+    masked_image[y:y+height, x:x+width] = 255
+ 
+    return masked_image
+
+
+def get_clip_image_embeddings(image):
+    """
+    Convert an image and text into embeddings using OpenAI's CLIP model.
+ 
+    Parameters:
+    - image_path: str, path to the image file.
+    - text: str, text to convert to embedding.
+ 
+    Returns:
+    - image_embedding: tensor, embedding of the image.
+    - text_embedding: tensor, embedding of the text.
+    """
+    # Load the model
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, preprocess = clip.load("ViT-B/32", device=device)
+ 
+    # Prepare the image
+    image_input = preprocess(image).unsqueeze(0).to(device)
+  
+    # Calculate embeddings
+    with torch.no_grad():
+        image_embedding = model.encode_image(image_input)
+ 
+    return image_embedding
     
 
 def center_crop_arr(pil_image, image_size):
@@ -376,7 +431,7 @@ class SynthTextDataset():
         all_boxes = []
         all_masks = []
         all_text_embeddings = []
-        # all_image_embeddings = []
+        all_image_embeddings = []
         # if is_det:
         #     all_category_names = []
 
@@ -404,6 +459,8 @@ class SynthTextDataset():
                 all_boxes.append( torch.tensor([x0,y0,x1,y1]) / self.image_size ) # scale to 0-1
                 all_masks.append(1)
                 all_text_embeddings.append(embeddings[i])
+                result_image = mask_image_outside_bbox(image, bbox)
+                all_image_embeddings.append( get_clip_image_embeddings(result_image) )
 
         # Sort according to area and choose the largest N objects   
         wanted_idxs = torch.tensor(areas).sort(descending=True)[1]
@@ -413,14 +470,14 @@ class SynthTextDataset():
         masks = torch.zeros(self.max_boxes_per_data)
         words = [words[i] for i in wanted_idxs]
         text_embeddings =  torch.zeros(self.max_boxes_per_data, self.embedding_len)
-        # image_embeddings = torch.zeros(self.max_boxes_per_data, self.embedding_len)
+        image_embeddings = torch.zeros(self.max_boxes_per_data, self.embedding_len)
         # if is_det:
         #     category_names = []
         for i, idx in enumerate(wanted_idxs):
             boxes[i] = all_boxes[idx]
             masks[i] = all_masks[idx]
             text_embeddings[i] =  all_text_embeddings[idx]
-            # image_embeddings[i] = all_image_embeddings[idx]
+            image_embeddings[i] = all_image_embeddings[idx]
             # if is_det:
             #     category_names.append(all_category_names[idx])
 
@@ -436,7 +493,7 @@ class SynthTextDataset():
         out["image_masks"] = image_masks # indicating how many objects still there after random dropping applied
         out["text_masks"] = text_masks # indicating how many objects still there after random dropping applied
         out["text_embeddings"] =  text_embeddings  
-        # out["image_embeddings"] = image_embeddings      
+        out["image_embeddings"] = image_embeddings      
         
 
 
